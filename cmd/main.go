@@ -1,18 +1,25 @@
 package main
 
 import (
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	kitprometheus "github.com/go-kit/kit/metrics/prometheus"
+	"github.com/johanbrandhorst/certify"
+	"github.com/johanbrandhorst/certify/issuers/vault"
 	"github.com/mainflux/agent/pkg/agent"
 	"github.com/mainflux/agent/pkg/agent/api"
 	"github.com/mainflux/agent/pkg/bootstrap"
@@ -176,10 +183,12 @@ func loadEnvConfig() (config.Config, error) {
 	}
 	file := mainflux.Env(envConfigFile, defConfigFile)
 	c := config.New(sc, cc, ec, lc, mc, file)
-	mc, err := loadCertificate(c.Agent.MQTT)
-	if err != nil {
-		return c, errors.Wrap(errFailedToSetupMTLS, err.Error())
-	}
+	c.Agent.MQTT.MTLS = true
+	c.Agent.MQTT.CAPath = "ca.crt"
+	mc, _ = loadCertificate(c.Agent.MQTT)
+	// if err != nil {
+	// 	return c, errors.Wrap(errFailedToSetupMTLS, err.Error())
+	// }
 	c.Agent.MQTT = mc
 	return c, nil
 }
@@ -203,13 +212,22 @@ func loadBootConfig(c config.Config, logger logger.Logger) (bsc config.Config, e
 		return c, errors.Wrap(errFailedToReadConfig, err.Error())
 	}
 
-	mc, err := loadCertificate(bsc.Agent.MQTT)
-	if err != nil {
-		return bsc, errors.Wrap(errFailedToSetupMTLS, err.Error())
-	}
+	bsc.Agent.MQTT.MTLS = true
+	bsc.Agent.MQTT.CAPath = "ca.crt"
+	mc, _ := loadCertificate(bsc.Agent.MQTT)
+	// if err != nil {
+	// 	return bsc, errors.Wrap(errFailedToSetupMTLS, err.Error())
+	// }
 
 	bsc.Agent.MQTT = mc
+
 	return bsc, nil
+}
+
+type keyGeneratorFunc func() (crypto.PrivateKey, error)
+
+func (kgf keyGeneratorFunc) Generate() (crypto.PrivateKey, error) {
+	return kgf()
 }
 
 func connectToMQTTBroker(conf config.MQTTConf, logger logger.Logger) (mqtt.Client, error) {
@@ -223,7 +241,7 @@ func connectToMQTTBroker(conf config.MQTTConf, logger logger.Logger) (mqtt.Clien
 	}
 
 	opts := mqtt.NewClientOptions().
-		AddBroker(conf.URL).
+		AddBroker("tcps://localhost:8883").
 		SetClientID(name).
 		SetCleanSession(true).
 		SetAutoReconnect(true).
@@ -235,9 +253,41 @@ func connectToMQTTBroker(conf config.MQTTConf, logger logger.Logger) (mqtt.Clien
 		opts.SetPassword(conf.Password)
 	}
 
+	// certConf := &certify.CertConfig{
+	// 	KeyGenerator: keyGeneratorFunc(func() (crypto.PrivateKey, error) {
+	// 		return ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	// 	}),
+	// }
+
+	iss := &vault.Issuer{
+		URL: &url.URL{
+			Scheme: "http",
+			Host:   "127.0.0.1:8200",
+		},
+		Role:       "agent",
+		TimeToLive: time.Minute * 10,
+		Token:      "s.nArgw6xn3uIOfA7nfKk8LFaW",
+	}
+
+	certConf := &certify.CertConfig{
+		KeyGenerator: keyGeneratorFunc(func() (crypto.PrivateKey, error) {
+			key, _ := rsa.GenerateKey(rand.Reader, 2048)
+			return key, nil
+		}),
+	}
+
+	certify := &certify.Certify{
+		CommonName:  conf.Password,
+		Issuer:      iss,
+		Cache:       certify.NewMemCache(),
+		RenewBefore: 24 * time.Hour,
+		CertConfig:  certConf,
+	}
+
 	if conf.MTLS {
 		cfg := &tls.Config{
-			InsecureSkipVerify: conf.SkipTLSVer,
+			InsecureSkipVerify:   conf.SkipTLSVer,
+			GetClientCertificate: certify.GetClientCertificate,
 		}
 
 		if conf.CA != nil {
@@ -278,6 +328,7 @@ func loadCertificate(cfg config.MQTTConf) (config.MQTTConf, error) {
 	if err != nil {
 		return c, err
 	}
+	c.CA = caByte
 	clientCert, err := os.Open(cfg.CertPath)
 	defer clientCert.Close()
 	if err != nil {
@@ -294,7 +345,6 @@ func loadCertificate(cfg config.MQTTConf) (config.MQTTConf, error) {
 	if err != nil {
 		return c, err
 	}
-	cfg.Cert = cert
-	cfg.CA = caByte
+	c.Cert = cert
 	return c, nil
 }

@@ -8,6 +8,7 @@ require (
 	github.com/edgexfoundry/go-mod-core-contracts v0.1.48
 	github.com/go-kit/kit v0.9.0
 	github.com/go-zoo/bone v1.3.0
+	github.com/johanbrandhorst/certify v1.8.0
 	github.com/mainflux/export v0.0.0-20200323141637-120ec7179230
 	github.com/mainflux/mainflux v0.0.0-20200212173448-51cd0524a11e
 	github.com/mainflux/senml v1.0.0
